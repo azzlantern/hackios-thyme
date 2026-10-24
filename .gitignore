@@ -1,0 +1,7 @@
+*.apfs
+*.dtb
+*.img
+*.log
+logs/
+out/
+.android/
