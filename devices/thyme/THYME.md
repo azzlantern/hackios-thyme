@@ -49,8 +49,24 @@ DEVICE=umi ./build-userland.sh     # WiFi firmware is gated on DEVICE=umi
 already in this repository instead:
 
 ```sh
-UEFI_FD=$PWD/devices/thyme/prebuilt/SILICIUM_UEFI.fd ./run.sh
+UEFI_FD=$PWD/legacy/prebuilt/uefi_sm8250/SILICIUM_UEFI.fd ./run.sh
 ```
+
+## Sessions: the resident image
+
+The system image is uploaded once per loader session, not once per run. `xl ramdisk
+system.apfs` asks the loader for a window (`oem ramdisk`) and sends the image (~2.4 GB); it
+stays in RAM, and every later `xl run` sends only the payload (~35 MB: kernel plus command
+line) and takes seconds. `xl ramdisk none` drops the resident image.
+
+Because it lives in RAM, a new upload is needed after a cold boot, `xl reboot`, or a fresh
+`fastboot boot` of the loader. `xl` records who uploaded which file and how big it was, and
+warns when a run would start against an image another working copy uploaded: a foreign image
+of the right kind is harmless, a foreign one of another kind kills the run without saying
+why.
+
+Booting from a flashed image (the iOS root volume on the phone's flash, `ufs_write=1`) would
+survive reboots, but it writes the phone's storage and has not been tried on this port.
 
 ## Loader
 
