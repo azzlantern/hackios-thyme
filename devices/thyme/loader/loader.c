@@ -2679,6 +2679,215 @@ print_memory_map(void)
 	}
 }
 
+static int starts_with(const char *s, const char *prefix);
+
+/*
+ * The thyme boot-argument gate.
+ *
+ * The kernel under this loader is built for one phone, and its drivers are switched on by
+ * boot arguments ("umi_touch=1", "gpu=1", "wifi=1", "fb_scan=1"). A misspelt or unsupported
+ * argument does not fail: the loader passes it to the kernel, the driver stays off, and the
+ * screen simply does not react. That is how a whole evening can go into chasing a typo. So
+ * every argument is checked here, before the kernel starts, and an unknown one stops the run
+ * with one line naming it.
+ *
+ * The list is the arguments the Mi 10S port uses plus the kernel's own debug switches.
+ * Whatever is not here is unset by the kernel anyway; to pass something through on purpose
+ * (a new driver test), add "bootargs_loose=1" to the command line and every unknown
+ * argument is printed and passed as before.
+ */
+static const char *const thyme_boot_args[] = {
+	"-v", "debug=", "keepsyms=", "serial=", "systrace=", "epoch=",
+	"cpus=", "bootcpu=", "loader_return_after=", "sb_delay=",
+	"umi_touch=", "umi_keys=", "umifts_scan=", "thyme=",
+	"cpufreq=", "fb_scan=", "fb_filter=", "fb_threads=", "gpu=", "metal=",
+	"adreno=", "adreno_pause=", "adreno_fine=", "adreno_return=",
+	"wifi=", "wifi_mac=", "bootargs_loose=",
+};
+
+/* A decimal number in [lo, hi]; no sign, no spaces, nothing else. */
+static int
+arg_number(const char *c, const char *end, unsigned lo, unsigned hi)
+{
+	unsigned v = 0;
+
+	if (c == end) {
+		return 0;
+	}
+	for (const char *p = c; p != end; p++) {
+		if (*p < '0' || *p > '9') {
+			return 0;
+		}
+		v = v * 10 + (unsigned)(*p - '0');
+		if (v > hi) {
+			return 0;
+		}
+	}
+	return v >= lo;
+}
+
+/* The value is exactly this text ("1"), nothing appended. */
+static int
+arg_is(const char *c, const char *end, const char *value)
+{
+	while (*value) {
+		if (c == end || *c++ != *value++) {
+			return 0;
+		}
+	}
+	return c == end;
+}
+
+/* 17 characters, six hex pairs separated by ':' — the form the Wi-Fi driver copies out. */
+static int
+arg_mac(const char *c, const char *end)
+{
+	if (end - c != 17) {
+		return 0;
+	}
+	for (int i = 0; i < 17; i++) {
+		char ch = c[i];
+
+		if (i % 3 == 2) {
+			if (ch != ':') {
+				return 0;
+			}
+		} else if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F'))) {
+			return 0;
+		}
+	}
+	return 1;
+}
+
+static int
+thyme_bootargs_ok(const struct payload_info *pi)
+{
+	int have_cpus = 0, have_bootcpu = 0, have_gpu = 0, have_wifi = 0, have_mac = 0;
+	int gpu = 0, metal = 0, loose = 0;
+
+	for (const char *c = pi->cmdline; *c;) {
+		while (*c == ' ') {
+			c++;
+		}
+		if (!*c) {
+			break;
+		}
+		const char *end = c;
+		while (*end && *end != ' ') {
+			end++;
+		}
+		char tok[64];
+		unsigned n = (unsigned)(end - c);
+		if (n >= sizeof(tok)) {
+			n = sizeof(tok) - 1;
+		}
+		for (unsigned i = 0; i < n; i++) {
+			tok[i] = c[i];
+		}
+		tok[n] = 0;
+
+		int known = 0;
+		for (unsigned i = 0; i < sizeof(thyme_boot_args) / sizeof(thyme_boot_args[0]); i++) {
+			const char *a = thyme_boot_args[i];
+			unsigned len = 0;
+			while (a[len]) {
+				len++;
+			}
+			if (starts_with(c, a) && (a[len - 1] == '=' || (unsigned)(end - c) == len)) {
+				known = 1;
+				break;
+			}
+		}
+		if (!known) {
+			if (!loose) {
+				print("thyme: unknown boot argument %s; refusing (bootargs_loose=1 passes it through)\n", tok);
+				return 0;
+			}
+			print("thyme: passing unknown boot argument %s through (bootargs_loose=1)\n", tok);
+		}
+
+		const char *v = c;
+		while (v != end && *v != '=') {
+			v++;
+		}
+		if (v != end) {
+			v++;
+		}
+
+		if (starts_with(c, "bootargs_loose=")) {
+			if (!arg_is(v, end, "1")) {
+				print("thyme: bootargs_loose takes 1\n");
+				return 0;
+			}
+			loose = 1;
+		} else if (starts_with(c, "cpus=")) {
+			if (have_cpus || !arg_number(v, end, 1, 8)) {
+				print("thyme: cpus= takes one value 1..8\n");
+				return 0;
+			}
+			have_cpus = 1;
+		} else if (starts_with(c, "bootcpu=")) {
+			if (have_bootcpu || !arg_number(v, end, 0, 7)) {
+				print("thyme: bootcpu= takes one value 0..7\n");
+				return 0;
+			}
+			have_bootcpu = 1;
+		} else if (starts_with(c, "loader_return_after=")) {
+			if (!arg_number(v, end, 0, 86400)) {
+				print("thyme: loader_return_after= takes seconds (0..86400)\n");
+				return 0;
+			}
+		} else if (starts_with(c, "sb_delay=") || starts_with(c, "adreno_pause=") || starts_with(c, "adreno=") ||
+			   starts_with(c, "fb_threads=") || starts_with(c, "umifts_scan=") || starts_with(c, "fb_filter=")) {
+			if (!arg_number(v, end, 0, 60000)) {
+				print("thyme: %s takes a number, no sign or unit\n", tok);
+				return 0;
+			}
+		} else if (starts_with(c, "umi_touch=") || starts_with(c, "umi_keys=") || starts_with(c, "cpufreq=") ||
+			   starts_with(c, "fb_scan=") || starts_with(c, "thyme=") || starts_with(c, "gpu=") ||
+			   starts_with(c, "metal=") || starts_with(c, "wifi=") || starts_with(c, "adreno_fine=") ||
+			   starts_with(c, "adreno_return=")) {
+			if (!arg_is(v, end, "1")) {
+				print("thyme: %s takes 1\n", tok);
+				return 0;
+			}
+			if (starts_with(c, "gpu=")) {
+				if (have_gpu) {
+					print("thyme: gpu=1 given twice\n");
+					return 0;
+				}
+				have_gpu = 1;
+				gpu = 1;
+			}
+			if (starts_with(c, "metal=")) {
+				metal = 1;
+			}
+			if (starts_with(c, "wifi=")) {
+				if (have_wifi) {
+					print("thyme: wifi=1 given twice\n");
+					return 0;
+				}
+				have_wifi = 1;
+			}
+		} else if (starts_with(c, "wifi_mac=")) {
+			if (have_mac || !arg_mac(v, end)) {
+				print("thyme: wifi_mac= takes six hex pairs, like wifi_mac=02:00:00:00:00:01\n");
+				return 0;
+			}
+			have_mac = 1;
+		}
+		c = end;
+	}
+	if (metal && !gpu) {
+		print("thyme: metal=1 needs gpu=1\n");
+		return 0;
+	}
+	if (have_wifi && !have_mac) {
+		print("thyme: wifi=1 without wifi_mac=: the scan will likely come back empty\n");
+	}
+	return 1;
+}
+
 static int
 choose_window(const struct payload_info *pi)
 {
@@ -2687,6 +2896,10 @@ choose_window(const struct payload_info *pi)
 	uint32_t desc_ver;
 	uint64_t best_base = 0, best_size = 0;
 	uint64_t pay_lo = PAYLOAD_BASE, pay_hi = PAYLOAD_BASE + PAYLOAD_MAX_SIZE;
+
+	if (!thyme_bootargs_ok(pi)) {
+		return 0;
+	}
 
 	if (win_size != 0) {
 		return 1;

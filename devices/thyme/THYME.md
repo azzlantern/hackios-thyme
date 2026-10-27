@@ -65,6 +65,14 @@ The kernel reads no board name (`hackios-board` appears nowhere in it); each dri
 enabled by its boot argument, so the loader only has to describe the platform and pass the
 command line.
 
+Before the kernel starts, the loader checks that command line (`thyme_bootargs_ok()`): an
+argument it does not know stops the run with one line naming it, instead of being passed on
+silently and leaving a driver switched off. Values are checked too — `cpus=1..8`,
+`bootcpu=0..7`, `gpu=`/`metal=`/`wifi=`/`fb_scan=` take `1`, `wifi_mac=` needs six hex
+pairs — and `wifi=1` without `wifi_mac=` prints a warning. To try a new kernel argument
+before adding it to the list, put `bootargs_loose=1` on the command line: unknown arguments
+are then printed and passed through.
+
 Known gap, and the one thing worth adding: the loader does not hand the GPU back to
 TrustZone, so a run that follows a GPU run hangs in the GPU steps and needs a cold boot
 (power key 10–15 s) to clear the secure state. The Mi 10 Ultra port hit the same thing and
