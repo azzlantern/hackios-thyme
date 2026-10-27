@@ -1,7 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 DEVICE_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-ROOT=$(cd "$DEVICE_DIR/../.." && pwd)
+# ROOT is the HackiOS tree this package is applied to. By default the repository that
+# contains this directory; set THYME_ROOT to build against another checkout, e.g.
+#   THYME_ROOT=../hackios-xnu-kernel-umi ./build-kernel.sh
+ROOT=${THYME_ROOT:-$(cd "$DEVICE_DIR/../.." && pwd)}
+ROOT=$(cd "$ROOT" && pwd)
 OUT="$ROOT/out/thyme"
 export XL_KERNEL="$OUT/xnu/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837"
 export XL_LOADER="$OUT/loader.efi"

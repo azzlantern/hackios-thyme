@@ -2,12 +2,14 @@
 """Stage UMI code into generated trees; never overwrite upstream driver templates."""
 import argparse
 import hashlib
+import os
 from pathlib import Path
 import shutil
 import subprocess
 
 DEVICE = Path(__file__).resolve().parent
-ROOT = DEVICE.parents[1]
+# The HackiOS tree this package is applied to (see build-*.sh: THYME_ROOT).
+ROOT = Path(os.environ.get('THYME_ROOT') or DEVICE.parents[1]).resolve()
 OUT = ROOT / 'out/thyme'
 KERNEL = OUT / 'xnu'
 

@@ -4,7 +4,7 @@ from pathlib import Path
 import os
 
 DEVICE = Path(__file__).resolve().parents[1]
-ROOT = DEVICE.parents[1]
+ROOT = Path(os.environ.get('THYME_ROOT') or DEVICE.parents[1]).resolve()
 OUT = ROOT / 'out/thyme'
 sandbox = OUT / 'runtime'
 sandbox.mkdir(parents=True, exist_ok=True)

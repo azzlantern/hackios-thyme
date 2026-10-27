@@ -6,7 +6,7 @@ from pathlib import Path
 import shutil
 
 DEVICE = Path(__file__).resolve().parents[1]
-ROOT = DEVICE.parents[1]
+ROOT = Path(os.environ.get('THYME_ROOT') or DEVICE.parents[1]).resolve()
 spec = importlib.util.spec_from_file_location('umi_prepare', DEVICE / 'prepare.py')
 prepare = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(prepare)
