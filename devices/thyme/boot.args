@@ -1,0 +1,12 @@
+# thyme (Xiaomi Mi 10S / SM8250-AC / Adreno 650) command line.
+# Based on the line verified on a real Mi 10S on 2026-10-25 (M1-M6):
+#   loader_return_after=900 sb_delay=8 bootcpu=7 cpus=7 umi_touch=1 umi_keys=1
+#   gpu=1 wifi=1 fb_scan=1 cpufreq=1
+# bootcpu=7 cpus=7 keeps one core for the loader, so its USB link stays alive
+# during the session and logs/screenshots can still be fetched.
+# The driver and boot-arg names stay "umi": the ST FTS touch driver, the A650
+# GPU path and the Wi-Fi stack share that code with the Mi 10 port.
+# Fill in your own radio address (HyperOS: cat /sys/class/net/wlan0/address);
+# without it the Wi-Fi scan comes back empty.
+#wifi_mac=00:00:00:00:00:00
+bootcpu=7 cpus=7 loader_return_after=900 sb_delay=8 umi_touch=1 umi_keys=1 gpu=1 wifi=1 fb_scan=1 cpufreq=1
