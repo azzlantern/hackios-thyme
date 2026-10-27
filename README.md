@@ -27,8 +27,23 @@ Not working, in order of how much they matter:
   `logdump`. There is no path back from a wrong write to the phone's storage.
 - **Bluetooth**: QCA6390's BT half is on SLIMbus, where upstream has nothing to build on. The
   reconnaissance (hardware, DT nodes, references) is in `docs/thyme-port-plan.md`.
-- **The GPU is not handed back**: a run that follows a GPU run hangs and needs a cold boot
-  (power key 10–15 s) to clear the TrustZone state.
+- **The GPU is not handed back**: rendering works (row above), but after a run the GPU and
+  TrustZone keep their state and the loader has no reset for it, so the *next* run hangs in
+  the GPU steps and needs a cold boot (power key 10–15 s) to clear it. The Mi 10 Ultra port
+  met the same wall.
+
+## Acknowledgements
+
+- **OOSEX GANG** — the HackiOS project this is built on: the XNU patches, the EFI loader, the
+  UEFI port and the Wi-Fi compatibility layer ([upstream](https://github.com/oosexgang/hackios-xnu-kernel)).
+- **JopangJovan** — `hackios-xnu-kernel-umi` / `hackios-xnu-userland-umi`, the Mi 10 device
+  package the driver overlay here is derived from (ST FTS touch, Adreno 650, rpmh, display).
+- **DBC1349** — the Mi 10 Ultra (`cas`) port, the first kona phone where touch, GPU and Wi-Fi
+  worked on this code base.
+- **chenbiwei520-alt** — the Mi 10S bring-up of 2026-10-25 (M1–M6 in one day), whose archive
+  supplied the device tree, the zap-window correction and the verified command line;
+  `docs/thyme-port-*.md` are that archive's notes.
+- **Project Silicium** — Mu-Silicium, the EDK2 UEFI port the boot image is built from.
 
 ## Layout
 
