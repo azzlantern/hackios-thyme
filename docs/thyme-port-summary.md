@@ -27,7 +27,7 @@
 | umi-boot.img | **thyme 的启动镜像**(thyme UEFI + loader,可反复 fastboot boot) |
 | thyme-wifi-mac.bin | **最终 payload**(内核 8268600f + Mesa root.apfs + 全部固件 + wifi_mac) |
 | thyme-gpu1/thyme-diag2/thyme-wifi-diag/full | 过程 payload(诊断模式各有用途) |
-| wlan_mac.bin→wifi_mac=4e:d8:4c:91:70:32 | WiFi MAC(来自 HyperOS 运行时 /sys/class/net/wlan0/address) |
+| wlan_mac.bin→wifi_mac=02:00:00:00:00:01 | WiFi MAC(来自 HyperOS 运行时 /sys/class/net/wlan0/address) |
 | ios-screen/gpu-screen/wifi-screen/touch-screen.png | 各里程碑截屏 |
 
 ## 复现流程(WiFi 全量启动)
@@ -48,7 +48,7 @@ fastboot oem run                                       # 点火;iOS 30 分钟自
 1. **zap 内存地址**:`hk_adreno.c` ZAP_MEMORY_UMI `0x8681a000`→`0x8c41a000`(thyme DTB pil_gpu_region;不改则 TZ 认证挂死)
 2. **DTB**:全部用 thyme.dtb(触摸 FTS@0x49 与 umi 同款,零驱动改动)
 3. **UEFI 驱动**:从 thyme 自己的 xbl 提取(90 个,extract.py GUID 全匹配)+ RawFiles 56 个手动拷(extract.py 因 TzDxeLA 版本哈希不同早退)
-4. **WiFi MAC**:cmdline `wifi_mac=4e:d8:4c:91:70:32`(HyperOS 无 persist/wlan_mac.bin,运行时接口取)
+4. **WiFi MAC**:cmdline `wifi_mac=02:00:00:00:00:01`(HyperOS 无 persist/wlan_mac.bin,运行时接口取)
 5. **显示 TE 同步(hk_display.c,治撕裂)**:thyme 的面板是 autorefresh(0x2b4 bit31)但 TE config(0x288=0x180088)缺 umi 校准要求的 BIT(20)|BIT(23) → command 校准失败 → fb_scan 同步整体搁置 → GPU 撕裂。且 thyme 的 0x298/0x2b0 计数器**不按帧回绕**(自由行计数,~7μs/行),umi 的"回绕测帧周期"法失效。修复:校准改用**行进速率 × 2340 行构造帧基准**(60.334Hz,与 cas 的 60.316Hz 一致),idle 窗口取帧尾 scan.lines-100,成功打出 "staged presentation enabled"。诊断手段:临时 printf 采样 TE 计数器(测得 +9 行/50μs、无回绕)是破案关键。
 
 ## 今天的全部关键坑(按时间序)

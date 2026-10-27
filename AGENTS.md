@@ -2,6 +2,10 @@
 
 Instructions for an AI agent (or a new contributor) working in this repository.
 
+This file is part of the repository and published with it, under the same APSL 2.0 license as
+everything else here. Keep it that way: no personal paths, addresses, request IDs or other
+details that cannot be public.
+
 ## What this repository is
 
 A **device package**, not a kernel tree. It adds Xiaomi Mi 10S (`thyme`, M2102J2SC,
