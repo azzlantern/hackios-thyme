@@ -52,6 +52,44 @@ already in this repository instead:
 UEFI_FD=$PWD/devices/thyme/prebuilt/SILICIUM_UEFI.fd ./run.sh
 ```
 
+## Loader
+
+`loader/loader.c` is the loader source kept for this port: it carries `platform_thyme`
+(framebuffer base 0x9C000000, GIC 0x17A00000/0x17A60000, 8 cores, small mask 0x0f). It speaks
+the same resident-loader protocol the tree's `xl` drives (`oem ramdisk`, `stage`, `oem run`,
+`get_staged`, `oem screenshot`), so it can replace the Mi 10 loader unchanged.
+`loader/loader.umi.c` is the Mi 10 port's loader, kept for reference only — `build-loader.sh`
+compiles `loader.c`.
+
+The kernel reads no board name (`hackios-board` appears nowhere in it); each driver is
+enabled by its boot argument, so the loader only has to describe the platform and pass the
+command line.
+
+Known gap, and the one thing worth adding: the loader does not hand the GPU back to
+TrustZone, so a run that follows a GPU run hangs in the GPU steps and needs a cold boot
+(power key 10–15 s) to clear the secure state. The Mi 10 Ultra port hit the same thing and
+solved it in its loader.
+
+## RPMh rails (Wi-Fi supplies)
+
+`umi_rpmh.c` refuses to continue when a rail it asks for is missing from the command
+database (`UMI RPMH: <rail> lookup matches=0; refusing`) — that is what stopped the Mi 10
+Ultra's Wi-Fi. For the Mi 10S the rails in that table match the device tree exactly:
+
+| Supply | Rail | Regulator |
+|---|---|---|
+| WLAN IO | `smpa4` | pm8150_s4 |
+| WLAN AON | `smpa6` | pm8150_s6 |
+| WLAN digital | `smpf2` | pm8009_s2 |
+| WLAN RFA1 | `smpa5` | pm8150_s5 |
+| WLAN RFA2 | `smpc8` | pm8150a_s8 |
+| PCIe 1.8 V | `ldoa9` | pm8150_l9 |
+| PCIe 0.9 V | `ldoa5` | pm8150_l5 |
+
+Seven of seven, `smpf2` included. If a firmware update ever changes the database, the
+command to run is [tools/rpmh-rails.c](tools/rpmh-rails.c): it prints the database's VRM
+entries so the table can be corrected against evidence instead of guesswork.
+
 ## Traps (all reproduced on hardware)
 
 - The command line must not carry `rd=` — the loader adds `rd=md0` itself.

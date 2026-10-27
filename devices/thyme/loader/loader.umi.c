@@ -15,7 +15,9 @@
 /* ------------------------------------------------------------------------ */
 /* Fixed conventions shared with the boot shim, the packer and the kernel   */
 
+#ifndef PAYLOAD_BASE
 #define PAYLOAD_BASE        0xF0000000ULL
+#endif
 #define PAYLOAD_MAGIC       0x50554E58u /* "XNUP" */
 
 struct payload_header { uint32_t magic; uint32_t size; };
@@ -298,6 +300,7 @@ static char out_buf[2 * 1024 * 1024];
 static uint8_t block_buffer[BLOCK_BUFFER_SIZE] __attribute__((aligned(0x2000)));
 static const char *staged_data = out_buf;   /* what "upload" sends: normally the log in out_buf */
 static uint64_t staged_len;
+static uint64_t completed_log_len;
 
 static void
 compose_logs(const char *klog, uint64_t klog_len)
@@ -320,6 +323,7 @@ compose_logs(const char *klog, uint64_t klog_len)
 		n += sizeof(end) - 1;
 	}
 	staged_len = n;
+	completed_log_len = klog != NULL ? n : 0;
 }
 
 static int hc_list_is_uefis(void);
@@ -330,7 +334,12 @@ static void hc_take_back(const char *when);
 static void
 write_logs(const char *klog, uint64_t klog_len)
 {
+	/* The UMI bring-up keeps logs in RAM/USB; no raw partition writes. */
+#ifdef LOADER_UMI
+	efi_block_io *bio = NULL;
+#else
 	efi_block_io *bio = find_log_partition();
+#endif
 
 	compose_logs(klog, klog_len);
 	if (bio == NULL) {
@@ -553,14 +562,13 @@ static const struct platform platform_redwood = {
 	.fb_base = 0xE1000000,
 };
 
-static const struct platform platform_thyme = {
-	.name = "thyme",
-	.io_base = 0x00400000, .io_size = 0x3FC00000,
+/* UMI: GIC and MPIDR from the supplied DTB. GOP supplies the actual scanout. */
+static const struct platform platform_umi = {
+	.name = "umi", .io_base = 0x00400000, .io_size = 0x3FC00000,
 	.gic_dist = 0x17A00000, .gic_redist = 0x17A60000,
-	.uart = 0,
-	.log_other_cpu = 1,
-	.cores = 8, .core_shift = 8,
-	.small_cores = 0x0f,
+	.cores = 8, .core_shift = 8, .small_cores = 0x0f,
+	/* Continuous splash from the older UMI port; an explicit UMI build also
+	 * accepts a relocated GOP buffer after checking its dimensions. */
 	.fb_base = 0x9C000000,
 };
 
@@ -571,7 +579,6 @@ static const struct platform platform_thyme = {
  */
 static const struct platform *const platforms[] = {
 	&platform_redwood,
-	&platform_thyme,
 };
 
 /* ------------------------------------------------------------------------ */
@@ -1468,13 +1475,13 @@ ufs_survey(void)
  * resident, and this loader already serves the kernel from core 0 while the kernel runs on another
  * (the battery). So the kernel asks for blocks through a page both can see, and core 0 reads them
  * with that driver's ReadBlocks into a buffer both can see. The kernel's side is
- * bsd/dev/redwood_ufs.c; it gets the page's address as ufs_shared_pa= on its command line.
+ * bsd/dev/hakios.ufs.c; it gets the page's address as ufs_shared_pa= on its command line.
  *
  * Reads, and -- with ufs_write=1 on the command line -- writes into one partition and nowhere
  * else: the port's own darwin, proved by its GPT entry (name, both GUIDs, first and last LBA, its
  * logical unit), and in it only past everything the build writes from the computer, so that no
  * answer to the kernel can reach Android's partitions, the iOS volume or the cryptexes. The
- * refusals are here, in the kernel (bsd/dev/redwood_ufs.c) and in UEFI's own driver, which gives
+ * refusals are here, in the kernel (bsd/dev/hakios.ufs.c) and in UEFI's own driver, which gives
  * out a partition's BlockIo and bounds it: a request has to pass all three.
  *
  * Each side writes its own cache lines only: the kernel the request, core 0 the answer (and the
@@ -1489,6 +1496,7 @@ ufs_survey(void)
 #define BLOCK_MAX_PARTS    160
 #define BLOCK_MAX_UNITS    16
 #define BLOCK_PART_UNIT    1u                          /* the entry is a whole logical unit, not a partition */
+#define BLOCK_PART_VIRTUAL 2u                          /* darwin as a file of userdata (darwinfile.c): on no unit of its own */
 #define BLOCK_OP_READ      0u
 #define BLOCK_OP_WRITE     1u
 
@@ -1501,10 +1509,13 @@ ufs_survey(void)
  * same partition, named the same, of the same size, in the same place, on logical unit 0.
  */
 #define BLOCK_WRITE_FIRST  2042368ULL                  /* darwin's blocks of 4096: past both cryptexes */
-#define BLOCK_DARWIN_FIRST 25374720ULL                 /* its first and last LBA of unit 0, as the GPT has them */
-#define BLOCK_DARWIN_LAST  30617594ULL
+/*
+ * Its first and last LBA of unit 0 as the GPT has them, and its unique GUID: this phone's, from its identity
+ * file (phones/<serial>.darwin, made when its darwin was cut: common/flash/darwinid.py), which xnuloader/build.sh
+ * turns into darwin_identity.h (DARWIN_ID=file); without one, the phone the port was brought up on.
+ */
+#include "darwin_identity.h"
 #define BLOCK_DARWIN_TYPE  { 0x7c3457ef, 0x0000, 0x11aa, { 0xaa, 0x11, 0x00, 0x30, 0x65, 0x43, 0xec, 0xac } }
-#define BLOCK_DARWIN_UNIQ  { 0xfd6854ad, 0x24aa, 0x4fc3, { 0x94, 0xfe, 0x29, 0x01, 0x16, 0x85, 0x8d, 0x68 } }
 
 /*
  * The partitions first, then the logical units they are on (BLOCK_PART_UNIT, named unit0, unit1,
@@ -1823,6 +1834,8 @@ hc_init(void)
  * The firmware's configuration tables, by GUID (an ACPI or device tree table among them would say
  * where the storage controller is).
  */
+#include "darwinfile.c"
+
 static void
 block_tables(void)
 {
@@ -1954,6 +1967,32 @@ block_start(void)
 		if (block_probe_requested && bp->name[0] == 'd' && bp->name[1] == 'a' && bp->name[2] == 'r' &&
 		    bp->name[3] == 'w' && bp->name[4] == 'i' && bp->name[5] == 'n' && bp->name[6] == 0) {
 			block_io2_probe(handles[i], bio);
+		}
+	}
+	/* darwin as a file of userdata: a partition of its own blocks, on no unit (the kernel reads it through here) */
+	if (darwin_file_bio() != NULL && block_shared.parts + nunits < BLOCK_MAX_PARTS) {
+		struct loader_block_part *bp = &block_shared.part[block_shared.parts];
+		static const char darwin_name[] = "darwin";
+
+		memcpy(bp->name, darwin_name, sizeof(darwin_name));
+		bp->block_size = 4096;
+		bp->blocks = DARWIN_FILE_BLOCKS;
+		bp->start_lba = 0;
+		bp->unit = 0xffff;
+		bp->lun = 0xff;
+		bp->flags = BLOCK_PART_VIRTUAL;
+		if (block_write_requested) {
+			block_write_part = (int)block_shared.parts;
+			print("ufs: darwin (a file of %s): its blocks from %d on may be written this run\n", DARWIN_FILE_HOST,
+			    BLOCK_WRITE_FIRST);
+		}
+		block_bios[block_shared.parts++] = darwin_file_bio();
+		/* the kernel's copy of the map: the host is userdata's entry in this table */
+		for (uint32_t k = 0; k < block_shared.parts; k++) {
+			if (str_eq(block_shared.part[k].name, DARWIN_FILE_HOST) && !(block_shared.part[k].flags & BLOCK_PART_UNIT)) {
+				darwin_file_publish(k);
+				break;
+			}
 		}
 	}
 	for (uint64_t u = 0; u < nunits; u++) {
@@ -2510,6 +2549,8 @@ struct payload_info {
 	const uint8_t *kernel;
 	const uint8_t *ramdisk;
 	uint32_t ramdisk_size;
+	const uint8_t *resident;        /* "resident": an image to put at the resident address (a bundle of the flash) */
+	uint32_t resident_size;
 	const char *cmdline;
 	uint64_t checkpoint;
 	uint64_t forced_base;
@@ -2552,7 +2593,12 @@ parse_payload(struct payload_info *pi, int verbose)
 		if (verbose) {
 			print("payload entry '%s' size %x\n", e->name, (uint64_t)e->size);
 		}
-		if (str_eq(e->name, "ramdisk")) {
+		if (str_eq(e->name, "resident")) {
+			/* what `xl ramdisk` uploads over USB, carried by the payload instead: an installed phone's boot
+			 * bundle has no computer to upload it (common/flash/mkbundle.py --resident) */
+			pi->resident = p + sizeof(*e);
+			pi->resident_size = e->size;
+		} else if (str_eq(e->name, "ramdisk")) {
 			pi->ramdisk = p + sizeof(*e);             /* becomes /dev/md0, the root device */
 			pi->ramdisk_size = e->size;
 		} else if (str_eq(e->name, "kernel")) {
@@ -2679,9 +2725,194 @@ print_memory_map(void)
 	}
 }
 
+static int starts_with(const char *s, const char *prefix);
+
+/* UMI boot-argument gate: keep device-specific tests explicit and protect
+ * the unchanged prebuilt kernel from Redwood MMIO. */
+static int
+umi_bootargs_ok(const struct payload_info *pi)
+{
+	static const char *const allowed[] = {
+		"-v", "debug=", "keepsyms=", "serial=", "cpus=", "bootcpu=",
+		"loader_return_after=", "epoch=", "sb_delay=", "systrace=", "umi_touch=", "umi_keys=", "umifts_scan=",
+		/* Narrowly allow the existing frame-latency diagnostics on UMI. */
+		"touch_lat=1", "cpuload=1000", "thermal=2",
+		"torch=1", "torch=2", "torch=3",
+		"umi_haptic=", "haptic_effect=", "haptic_gain=", "adsp=", "sound=", "adsp_umi=", "adsp_step=", "adsp_return=", "umi_amp_probe=",
+		"gpu=", "metal=", "cpufreq=", "fb_scan=", "fb_filter=", "fb_threads=", "fbscale=", "adreno=", "adreno_pause=", "adreno_fine=", "adreno_return=",
+		"umi_wifi_step=", "umi_wifi_return=", "wifi_mac=", "wifi=1", "umi_bt_probe=", "umi_bt=",
+		"glcopy=1",
+		"gltargetcopy=1",
+	};
+	int adsp_umi = 0, adsp_step = 0, adsp_return = 0, umi_amp_probe = 0, adsp_on = 0, sound = 0;
+	int gpu = 0, metal = 0, cpufreq = 0, fb_filter = 0, fb_threads = 0, fbscale = 0, adreno = 0, adreno_fine = 0, adreno_return = 0;
+	int umi_wifi_step = 0, umi_wifi_return = 0, wifi_mac = 0, wifi_on = 0;
+	if (PLAT != &platform_umi) return 1;
+	if (pi->forced_base != 0) {
+		print("UMI: forced physical memory windows are disabled\n");
+		return 0;
+	}
+	for (const char *c = pi->cmdline; *c;) {
+		while (*c == ' ') c++;
+		if (!*c) break;
+		const char *end = c;
+		while (*end && *end != ' ') end++;
+		int ok = 0;
+		for (unsigned i = 0; i < sizeof(allowed) / sizeof(allowed[0]); i++) {
+			uint64_t len = str_len(allowed[i]);
+			if (starts_with(c, allowed[i]) &&
+			    (allowed[i][len - 1] == '=' || c + len == end)) ok = 1;
+		}
+		if (starts_with(c, "adsp=")) {
+			if (adsp_on || end - c != 6 || c[5] != '1') ok = 0;
+			adsp_on = 1;
+		} else if (starts_with(c, "sound=")) {
+			if (sound || end - c != 7 || c[6] < '1' || c[6] > '4') ok = 0;
+			sound = 1;
+		} else if (starts_with(c, "adsp_umi=")) {
+			if (adsp_umi || end - c != 10 || c[9] != '1') ok = 0;
+			adsp_umi = 1;
+		} else if (starts_with(c, "adsp_step=")) {
+			uint32_t n = 0;
+			if (adsp_step || end - c <= 10) ok = 0;
+			for (const char *v = c + 10; v < end && ok; v++) {
+				if (*v < '0' || *v > '9' || n > 11) {
+					ok = 0;
+					break;
+				}
+				n = n * 10 + (uint32_t)(*v - '0');
+			}
+			if (n == 0 || n > 11) ok = 0;
+			adsp_step = 1;
+		} else if (starts_with(c, "adsp_return=")) {
+			if (adsp_return || end - c != 13 || c[12] != '1') ok = 0;
+			adsp_return = 1;
+		} else if (starts_with(c, "umi_bt=")) {
+			if (end - c != 8 || c[7] != '1') ok = 0;
+		} else if (starts_with(c, "umi_bt_probe=")) {
+			if (end - c != 14 || c[13] < '1' || c[13] > '5') ok = 0;
+		} else if (starts_with(c, "umi_amp_probe=")) {
+			if (umi_amp_probe || end - c != 15 || c[14] < '1' || c[14] > '5') ok = 0;
+			umi_amp_probe = 1;
+		} else if (starts_with(c, "umi_wifi_step=")) {
+			uint32_t n = 0;
+			if (umi_wifi_step || end - c <= 14) ok = 0;
+			for (const char *v = c + 14; v < end && ok; v++) {
+				if (*v < '0' || *v > '9' || n > 10) { ok = 0; break; }
+				n = n * 10 + (uint32_t)(*v - '0');
+			}
+			if (n == 0 || n > 10) ok = 0;
+			umi_wifi_step = 1;
+		} else if (starts_with(c, "umi_wifi_return=")) {
+			if (umi_wifi_return || end - c != 17 || c[16] != '1') ok = 0;
+			umi_wifi_return = 1;
+		} else if (starts_with(c, "wifi=")) {
+			if (wifi_on || end - c != 6 || c[5] != '1') ok = 0;
+			wifi_on = 1;
+		} else if (starts_with(c, "wifi_mac=")) {
+			if (wifi_mac || end - c != 26) ok = 0;
+			for (unsigned i = 0; i < 17 && ok; i++) {
+				char h = c[9 + i];
+				if (i % 3 == 2 ? h != ':' : !((h >= '0' && h <= '9') ||
+				    (h >= 'a' && h <= 'f') || (h >= 'A' && h <= 'F'))) ok = 0;
+			}
+			wifi_mac = 1;
+		} else if (starts_with(c, "gpu=")) {
+			if (gpu || end - c != 5 || c[4] != '1') ok = 0;
+			gpu = 1;
+		} else if (starts_with(c, "metal=")) {
+			if (metal || end - c != 7 || c[6] != '1') ok = 0;
+			metal = 1;
+		} else if (starts_with(c, "cpufreq=")) {
+			if (cpufreq || end - c != 9 || c[8] != '1') ok = 0;
+			cpufreq = 1;
+		} else if (starts_with(c, "fb_scan=")) {
+			if (end - c != 9 || c[8] != '1') ok = 0;
+		} else if (starts_with(c, "fb_filter=")) {
+			if (fb_filter || end - c != 11 || (c[10] != '0' && c[10] != '1')) ok = 0;
+			fb_filter = 1;
+		} else if (starts_with(c, "fb_threads=")) {
+			uint32_t n = 0;
+			if (fb_threads || end - c <= 11) ok = 0;
+			for (const char *v = c + 11; v < end && ok; v++) {
+				if (*v < '0' || *v > '9' || n > 8) {
+					ok = 0;
+					break;
+				}
+				n = n * 10 + (uint32_t)(*v - '0');
+			}
+			if (n == 0 || n > 8) ok = 0;
+			fb_threads = 1;
+		} else if (starts_with(c, "fbscale=")) {
+			if (fbscale || end - c != 9 || c[8] != '2') ok = 0;
+			fbscale = 1;
+		} else if (starts_with(c, "adreno=")) {
+			uint32_t n = 0;
+			if (adreno || end - c <= 7) ok = 0;
+			for (const char *v = c + 7; v < end && ok; v++) {
+				if (*v < '0' || *v > '9' || n > 22) {
+					ok = 0;
+					break;
+				}
+				n = n * 10 + (uint32_t)(*v - '0');
+			}
+			if (n == 0 || n > 22) ok = 0;
+			adreno = 1;
+		} else if (starts_with(c, "adreno_pause=")) {
+			uint32_t n = 0;
+			if (end - c <= 13) ok = 0;
+			for (const char *v = c + 13; v < end && ok; v++) {
+				if (*v < '0' || *v > '9' || n > 5000) {
+					ok = 0;
+					break;
+				}
+				n = n * 10 + (uint32_t)(*v - '0');
+			}
+			if (n > 5000) ok = 0;
+		} else if (starts_with(c, "adreno_fine=")) {
+			if (adreno_fine || end - c != 13 || c[12] != '1') ok = 0;
+			adreno_fine = 1;
+		} else if (starts_with(c, "adreno_return=")) {
+			if (adreno_return || end - c != 15 || c[14] != '1') ok = 0;
+			adreno_return = 1;
+		}
+		if (!ok) {
+			print("UMI: unsupported boot argument at: %s\n", c);
+			return 0;
+		}
+		c = end;
+	}
+	if ((adsp_on && !adsp_umi) || (sound && (!adsp_on || !adsp_umi)) || (adsp_on && adsp_step)) {
+		print("UMI: audio tests require adsp=1 adsp_umi=1, without diagnostic steps\n");
+		return 0;
+	}
+	if (adsp_step && (!adsp_umi || !adsp_return)) {
+		print("UMI: ADSP diagnostics require adsp_umi=1 and adsp_return=1\n");
+		return 0;
+	}
+	if (adreno && !adreno_return) {
+		print("UMI: early GPU diagnostics require adreno_return=1\n");
+		return 0;
+	}
+	if (gpu && adreno) {
+		print("UMI: choose gpu=1 for iOS or adreno=N for a diagnostic\n");
+		return 0;
+	}
+	if (metal && !gpu) {
+		print("UMI: metal=1 requires gpu=1\n");
+		return 0;
+	}
+	if (umi_wifi_step != umi_wifi_return || (umi_wifi_step && wifi_on)) {
+		print("UMI: Wi-Fi diagnostics require umi_wifi_step=1..10 umi_wifi_return=1\n");
+		return 0;
+	}
+	return 1;
+}
+
 static int
 choose_window(const struct payload_info *pi)
 {
+	if (!umi_bootargs_ok(pi)) return 0;
 	static uint8_t map_buf[65536];
 	uint64_t map_size = sizeof(map_buf), map_key, desc_size;
 	uint32_t desc_ver;
@@ -2741,8 +2972,6 @@ choose_window(const struct payload_info *pi)
  * back (panic, checkpoint, early exception); the combined log is staged and
  * written to the log partition. Returns 0 if the kernel could not be started.
  */
-static int starts_with(const char *s, const char *prefix);
-
 static int
 run_kernel(int have_checkpoint, uint64_t checkpoint)
 {
@@ -2807,6 +3036,19 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	if (pi.resident_rd != 0) {
 		resident_rd_size = pi.resident_rd;
 	}
+	if (pi.resident != NULL && pi.resident_size != 0) {
+		uint64_t res_pa = phys_base + RESIDENT_RD_OFFSET, n = pi.resident_size;
+
+		/* the payload holding it must not lie where it goes (in QEMU both are ordinary RAM) */
+		if (res_pa < PAYLOAD_BASE + PAYLOAD_MAX_SIZE && PAYLOAD_BASE < res_pa + n) {
+			print("the resident image's place overlaps the payload: not booted\n");
+			return 0;
+		}
+		memcpy((void *)res_pa, pi.resident, n);
+		clean_dcache(res_pa, res_pa + n);
+		resident_rd_size = n;
+		print("resident image from the payload: %d bytes at pa %x\n", n, res_pa);
+	}
 	if (resident_rd_size != 0) {
 		uint64_t res_pa = phys_base + RESIDENT_RD_OFFSET;
 		uint64_t res_size = (resident_rd_size + PAGE_SIZE_MAX - 1) & ~(PAGE_SIZE_MAX - 1);
@@ -2861,9 +3103,9 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	uint64_t this_mpidr = READ_SYSREG(MPIDR_EL1) & 0xFFFFFF, kernel_mpidr = this_mpidr;
 	/* "cpus=N" or "cpumask=M" there too: the kernel may have more cores than the one it starts on */
 	int more_cores = 0, battery_requested = 0, ufs_requested = 0;
-	/* "torch=N" (not 0) there too: the phone's flashlight is the kernel's (bsd/dev/redwood_torch.c) */
+	/* "torch=N" (not 0) there too: the phone's flashlight is the kernel's (bsd/dev/hakios.torch.c) */
 	int torch_requested = 0;
-	/* "cam=5" there too: the phone's wide camera is iOS's (bsd/dev/redwood_camera.c) */
+	/* "cam=5" there too: the phone's wide camera is iOS's (bsd/dev/hakios.camera.c) */
 	int camera_requested = 0;
 	/* (the loader stays for run after run: what the last run's arguments said must not hold for this one) */
 	gamut_p3 = 0;
@@ -3018,6 +3260,20 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		}
 		if (n < BOOT_LINE_LENGTH - 1) ba->commandLine[n++] = ' ';
 	}
+	if (block_enabled && df_state > 0 && df_map.magic != 0) {
+		/* darwin as a file: where its map is, for the kernel's own UFS driver (darwinfile.c) */
+		static const char prefix[] = "darwin_map_pa=0x";
+		static const char hex[] = "0123456789abcdef";
+		uint64_t address = (uint64_t)(uintptr_t)&df_map;
+
+		for (const char *c = prefix; *c && n < BOOT_LINE_LENGTH - 1; c++) {
+			ba->commandLine[n++] = *c;
+		}
+		for (int shift = 60; shift >= 0 && n < BOOT_LINE_LENGTH - 1; shift -= 4) {
+			ba->commandLine[n++] = hex[(address >> shift) & 0xf];
+		}
+		if (n < BOOT_LINE_LENGTH - 1) ba->commandLine[n++] = ' ';
+	}
 	if (battery_requested) {
 		static const char prefix[] = "battery_shared_pa=0x";
 		static const char hex[] = "0123456789abcdef";
@@ -3056,8 +3312,10 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	dt_identity(&w, identity_root, sizeof(identity_root) / sizeof(identity_root[0]), identity_root_data);
 	dt_prop_str(&w, "platform-name", "t8015");
 	/* what iBoot takes from the factory configuration of a real phone; fixed size fields */
-	dt_prop_padded(&w, "serial-number", "RDW00POCOX5P", 32);
-	dt_prop_padded(&w, "mlb-serial-number", "RDW00POCOX5PMLB00", 32);
+	const char *serial = PLAT == &platform_umi ? "UMI0XIAOMI10" : "RDW00POCOX5P";
+	const char *mlb_serial = PLAT == &platform_umi ? "UMI0XIAOMI10MLB00" : "RDW00POCOX5PMLB00";
+	dt_prop_padded(&w, "serial-number", serial, 32);
+	dt_prop_padded(&w, "mlb-serial-number", mlb_serial, 32);
 	dt_prop_padded(&w, "model-number", "MQAC2", 32);
 	dt_prop_padded(&w, "region-info", "LL/A", 32);
 	dt_prop_padded(&w, "regulatory-model-number", "A1865", 32);
@@ -3070,6 +3328,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	dt_prop_u64(&w, "dram-size", win_size);
 	dt_prop_u32(&w, "debug-enabled", 1);
 	/* what MobileGestalt answers "main screen scale" from: 3 device pixels per point */
+	dt_prop_str(&w, "hakios-board", plat->name);
 	dt_prop_u32(&w, "display-scale", 3);
 	dt_prop_u32(&w, "display-rotation", 0);
 	/* how the kernel is to ask the firmware for more cores (PSCI) */
@@ -3752,6 +4011,7 @@ fb_command(char *cmd)
 			uint64_t cp = selftest ? CHECKPOINT_SELFTEST : parse_number(arg, 10);
 
 			set_result("running", cp, 0);
+			completed_log_len = 0;
 			fb_reply("OKAY", "");
 			log_len = 0;
 			print("== XNULOADER run (usb) ==\n");
@@ -3765,11 +4025,17 @@ fb_command(char *cmd)
 			}
 		} else if (starts_with(cmd, "oem memmap")) {
 			/* the firmware's memory map into the log (then "oem log" and fetch it) */
+			completed_log_len = 0;
 			print_memory_map();
 			fb_reply("OKAY", "");
 		} else if (starts_with(cmd, "oem log")) {
 			if (busy) {
 				compose_live_log(running_live, running_slide);
+			} else if (completed_log_len) {
+				/* Keep the full completed kernel log: the console echo can
+				 * exceed log_buf, and a final live poll must not replace it. */
+				staged_data = out_buf;
+				staged_len = completed_log_len;
 			} else {
 				compose_logs(NULL, 0);
 			}
@@ -3858,10 +4124,6 @@ usb_command_loop(void)
  */
 #define PHONE_WIDTH     1125            /* the screen of the iPhone X, whose identity we carry */
 #define PHONE_HEIGHT    2436
-/* HACKIOS_RAMFB_HEIGHT: QEMU's ramfb refuses a mode taller than 2048 (bochs-vbe's
- * VBE_DISPI_MAX_YRES), so the panel is asked for 2048 rows and the kernel scales the
- * 1125x2436 display into it -- the same thing it does on a real phone. */
-#define RAMFB_HEIGHT    2048
 #define FW_CFG_BASE     0x09020000ULL   /* QEMU virt: data at +0, selector at +8, DMA address at +16 */
 #define FW_CFG_FILE_DIR 0x19
 #define FW_CFG_DMA_SELECT 0x08
@@ -3898,7 +4160,7 @@ ramfb_phone_screen(void)
 		char name[56];
 	} file;
 	uint32_t count, select = 0;
-	uint64_t fb = 0, bytes = (uint64_t)PHONE_WIDTH * 4 * RAMFB_HEIGHT;
+	uint64_t fb = 0, bytes = (uint64_t)PHONE_WIDTH * 4 * PHONE_HEIGHT;
 
 	*(volatile uint16_t *)(FW_CFG_BASE + 8) = __builtin_bswap16(FW_CFG_FILE_DIR);
 	fw_cfg_read(&count, sizeof(count));
@@ -3917,24 +4179,23 @@ ramfb_phone_screen(void)
 	cfg.fourcc = be32(0x34325258);          /* 'XR24': blue, green, red, unused */
 	cfg.flags = 0;
 	cfg.width = be32(PHONE_WIDTH);
-	cfg.height = be32(RAMFB_HEIGHT);
+	cfg.height = be32(PHONE_HEIGHT);
 	cfg.stride = be32(PHONE_WIDTH * 4);
 	dma.control = be32(select << 16 | FW_CFG_DMA_SELECT | FW_CFG_DMA_WRITE);
 	dma.length = be32(sizeof(cfg));
 	dma.address = __builtin_bswap64((uint64_t)(uintptr_t)&cfg);
 	*(volatile uint64_t *)(FW_CFG_BASE + 16) = __builtin_bswap64((uint64_t)(uintptr_t)&dma);
 	if (dma.control != 0) {
-		/* HACKIOS: this is the value we wrote ourselves; nothing writes back into it, so it
-		 * says nothing about whether the request worked. QEMU's ramfb refuses a mode taller
-		 * than 2048 (VBE_DISPI_MAX_YRES), and the mode it takes is the one in the panel. */
-		print("ramfb: control %x after the request (the mode is taken as it stands)\n",
-		    (uint64_t)be32(dma.control));
+		print("ramfb: control %x after the request\n", (uint64_t)be32(dma.control));
+		return;
 	}
 	SCREEN.base = fb;
 	SCREEN.width = PHONE_WIDTH;
-	SCREEN.height = RAMFB_HEIGHT;
+	SCREEN.height = PHONE_HEIGHT;
 	SCREEN.stride = PHONE_WIDTH * 4;
 }
+
+#include "flashboot.c"
 
 efi_status EFIAPI
 efi_main(efi_handle image, efi_system_table *st)
@@ -3963,10 +4224,20 @@ efi_main(efi_handle image, efi_system_table *st)
 		for (unsigned i = 0; i < sizeof(platforms) / sizeof(platforms[0]); i++)
 			if (platforms[i]->fb_base == SCREEN.base)
 				PLAT = platforms[i];
+		#ifndef LOADER_UMI
 		if (PLAT == &platform_qemu_virt)
 			ramfb_phone_screen();
+#endif
 		print("display %d x %d at %x\n", (uint64_t)SCREEN.width, (uint64_t)SCREEN.height, SCREEN.base);
 	}
+#ifdef LOADER_UMI
+	/* Do not turn an unknown phone framebuffer into QEMU's MMIO platform. */
+	if (GOP == NULL || SCREEN.width != 1080 || SCREEN.height != 2340) {
+		print("UMI: expected GOP 1080 x 2340; refusing kernel handoff\n");
+		return 0x8000000000000003ULL; /* EFI_UNSUPPORTED */
+	}
+	PLAT = &platform_umi;
+#endif
 	print("platform %s\n", PLAT->name);
 
 	install_exception_hook();
@@ -3978,10 +4249,16 @@ efi_main(efi_handle image, efi_system_table *st)
 		usb_command_loop();
 	}
 
-	/* One-shot mode: run the kernel that came with the image, then reset. */
-	if (have_payload) {
+	/*
+	 * One-shot mode: run the kernel that came with the image, then reset. A payload with the loader alone
+	 * (an installed device's boot partition: common/flash/install.sh) has no kernel: that is the menu's.
+	 */
+	if (have_payload && pi.kernel != NULL) {
 		run_kernel(0, 0);
+		reboot();
 	}
+	/* No kernel: an installed device booting on its own -- the menu, the bundle from darwin, Android */
+	fb_standalone();
 	reboot();
 	return 0;
 }

@@ -1,53 +1,66 @@
-# HackiOS `thyme` port
+# HackiOS on Xiaomi Mi 10S (`thyme`)
 
-This repository is a small overlay for the public [HackiOS XNU kernel project](https://github.com/oosexgang/hackios-xnu-kernel). It collects the device-specific source changes and the prebuilt boot files used for the Xiaomi Mi 10S (`thyme`, Snapdragon 870).
+A device package that adds the Xiaomi Mi 10S (M2102J2SC, SM8250-AC / SD870, Adreno 650) to
+the HackiOS XNU tree, which boots Apple's open-source XNU kernel (`xnu-8796.121.2`, the
+kernel of iOS 16.5) on Android phone hardware and runs the unmodified iOS 16.5 user space on
+top of it.
 
-## Status
+## Layout
 
-The port booted to iOS SpringBoard on one Xiaomi Mi 10S in a 240-second RAM session. Touch still does not work: the ST FTS controller ACKed I²C and reported firmware `0x0124`, but the driver observed `reports=0` throughout the session. Android recovery has not been established. This is experimental research software, not a daily-use ROM.
+| Path | What |
+|---|---|
+| `devices/thyme/` | the port: device tree, driver overlay, loader source, UEFI package, build scripts. Start at [devices/thyme/THYME.md](devices/thyme/THYME.md) |
+| `docs/thyme-port-plan.md` | the porting plan (Chinese) |
+| `docs/thyme-port-summary.md` | the result on hardware, milestone by milestone (Chinese) |
+| `legacy/` | the first attempt (2026-10-24): an overlay on the older HackiOS tree with its own ST FTS driver. Superseded by `devices/thyme/`; kept for its measurements and its SM8250 UEFI artifacts |
 
-The tested boot files are included in `overlay/prebuilt/`: the XNU kernel, loader, SM8250 UEFI image, and BootShim. A device tree blob and the iOS APFS images are not included; provide/build those locally as described below.
+## What is verified
 
-## Apply to HackiOS
+On one Mi 10S, 2026-10-25, in RAM sessions — nothing written except the loader's diagnostic
+log:
 
-The overlay was prepared against HackiOS base commit:
+| Milestone | Evidence |
+|---|---|
+| UEFI + loader | `xnuloader v0.5 / display 1080x2340 at 9c000000` |
+| XNU | Darwin 22.5.0, 7 cores via PSCI, `bsd_init` complete |
+| iOS 16.5 SpringBoard | `finished startup after 12.30s`, 137 processes |
+| Touch | `UMI FTS: poll=24375 events=2211 errors=0 irq=1` |
+| GPU | `THE GPU STAYS ON`, GMU 587 MHz, `Mesa 25.0.7; FD650` |
+| Wi-Fi | PCIe → amss20 → QMI → radio registered, networks visible in Settings |
 
-```text
-d82c64a3a31cd27a0a0afbf6e213e467e44b1b4c
-```
+Not working: Bluetooth (QCA6390 over SLIMbus; upstream has no base — see the plan in
+`docs/thyme-port-plan.md`), and the loader cannot hand the GPU back, so a run that follows a
+GPU run needs a cold boot.
 
-Use a clean checkout of that base, then copy the overlay into its root:
+## Build
+
+`devices/thyme` builds against a checkout of the HackiOS tree it is applied to; point
+`THYME_ROOT` at it:
 
 ```sh
-git clone https://github.com/oosexgang/hackios-xnu-kernel.git hackios
-cd hackios
-git checkout d82c64a3a31cd27a0a0afbf6e213e467e44b1b4c
-cd ..
-cp -a thyme-open-source/overlay/. hackios/
+cd devices/thyme
+THYME_ROOT=/path/to/hackios-xnu-kernel-umi ./build-loader.sh
+THYME_ROOT=/path/to/hackios-xnu-kernel-umi ./build-kernel.sh
+THYME_ROOT=/path/to/hackios-xnu-kernel-umi DEVICE=umi ./build-userland.sh
+THYME_ROOT=/path/to/hackios-xnu-kernel-umi ./build-wifi.sh
+THYME_ROOT=/path/to/hackios-xnu-kernel-umi ./run.sh
 ```
 
-Do not apply it on top of a modified checkout. It replaces the tracked files listed in `overlay/` with the versions tested for this port.
+The prebuilt kernel in the tree has no touch driver, so the kernel has to be built. The Wi-Fi
+firmware is gated on `DEVICE=umi` in the userland build. Add `wifi_mac=<address>` to
+`devices/thyme/boot.args` (from HyperOS: `/sys/class/net/wlan0/address`), or the scan comes
+back empty.
 
-## Build and run
+## Licenses
 
-Install the HackiOS build dependencies, prepare its userland checkout and iOS inputs, and obtain a thyme DTB from your own device or a source you are entitled to use:
-
-```sh
-cd hackios
-common/setup.sh
-ios165/fetch.sh
-THYME_DTB=/path/to/thyme.dtb common/build.sh thyme
-THYME_DTB=/path/to/thyme.dtb common/run.sh thyme 240
-```
-
-The run path uses both APFS images: `system.apfs` is uploaded to loader RAM and `root.apfs` is sent with the XNU payload. `common/run.sh` handles both. The full workflow has not yet been reproduced from a clean checkout.
-
-## Device storage
-
-The boot images are started through `fastboot boot` and the APFS images are transferred to RAM. The loader writes diagnostics to the phone's `logdump` partition. The tested XNU command line did not enable `ufs_write=1`; other storage paths are not claimed to be write-free. Read the detailed [thyme status](overlay/docs/THYME.md) before testing.
-
-## Provenance and licenses
-
-The overlay includes the HackiOS license and the upstream Mu-Silicium license notice. The local UEFI image has a recorded SHA-256, but its extraction from the named upstream release asset has not been reproduced; see `overlay/prebuilt/uefi_sm8250/README.md`. Do not treat the local artifact's exact provenance as verified.
-
-The bundle deliberately excludes `thyme.dtb`, `xbl.img`, extracted phone firmware, iOS/APFS images, logs, and build output. The `SHA256SUMS` file covers the files in this bundle.
+- No iOS files are in this repository. `ios165/fetch.sh` in the tree this package is applied
+  to downloads the iOS 16.5 IPSW from Apple's CDN.
+- The XNU changes are a derivative work of XNU and are distributed under APSL 2.0, like XNU;
+  `LICENSE` is that license.
+- `legacy/prebuilt/uefi_sm8250/` holds the SM8250 UEFI and BootShim used by the first
+  attempt, with the upstream notice and local hashes; see its `README.md` before
+  redistributing.
+- Neither `legacy/` nor `devices/thyme/` contains Apple or vendor firmware: the phone's own
+  firmware is taken from the phone it runs on.
+- HackiOS is an independent research project; it is not affiliated with, authorised or
+  endorsed by Apple Inc. iOS, iPhone and Apple are trademarks of Apple Inc.
